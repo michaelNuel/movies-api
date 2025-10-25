@@ -3,9 +3,11 @@ package handlers
 import (
 	"database/sql"
 	"encoding/json"
+	"net/http"
+
 	"github.com/gorilla/mux"
 	_ "github.com/lib/pq"
-	"net/http"
+	"github.com/michaelNuel/movies-api/src/config"
 )
 
 type Movie struct {
@@ -23,9 +25,9 @@ type Director struct {
 var db *sql.DB
 
 func init() {
-	connStr := "postgresql://postgres:GWi9dK00@localhost:5432/movie_db?sslmode=disable"
+	config.LoadConfig()
 	var err error
-	db, err = sql.Open("postgres", connStr)
+	db, err = sql.Open("postgres", config.DB_URL)
 	if err != nil {
 		panic("Failed to connect to the database:" + err.Error())
 	}

@@ -1,20 +1,20 @@
 package handlers
 
 import (
-	"database/sql"
 	"encoding/json"
 	"net/http"
 
 	"github.com/gorilla/mux"
-	_ "github.com/lib/pq"
 	"github.com/michaelNuel/movies-api/src/config"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
 )
 
 type Movie struct {
-	ID       string    `json:"id"`
-	Isbn     string    `json:"isbn"`
-	Title    string    `json:"title"`
-	Director *Director `json:"director"`
+	ID        uint      `json:"id" gorm:"primaryKey"`
+	Isbn      string    `json:"isbn" gorm:"not null"`
+	Title     string    `json:"title" gorm:"not null"`
+	Director  Director  `json:"director" gorm:"embedded;embeddedPrefix:director_"`
 }
 
 type Director struct {
@@ -22,119 +22,118 @@ type Director struct {
 	Lastname  string `json:"lastname"`
 }
 
-var db *sql.DB
+var db *gorm.DB
 
 func init() {
 	config.LoadConfig()
 	var err error
-	db, err = sql.Open("postgres", config.DB_URL)
+	db, err = gorm.Open(postgres.Open(config.DB_URL), &gorm.Config{})
 	if err != nil {
-		panic("Failed to connect to the database:" + err.Error())
+		panic("Failed to connect to the database: " + err.Error())
 	}
-	err = db.Ping()
+	
+	// Auto-migrate the schema
+	err = db.AutoMigrate(&Movie{})
 	if err != nil {
-		panic("Database ping failed: " + err.Error())
+		panic("Failed to migrate database: " + err.Error())
 	}
 }
 
 func GetMovies(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	rows, err := db.Query("SELECT id, isbn, title, director_firstname, director_lastname FROM movies")
-	if err != nil {
+	
+	var movies []Movie
+	if err := db.Find(&movies).Error; err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	defer rows.Close()
-
-	var movies []Movie
-	for rows.Next() {
-		var m Movie
-		var df, dl sql.NullString // For nullable director fields
-		err := rows.Scan(&m.ID, &m.Isbn, &m.Title, &df, &dl)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		m.Director = &Director{Firstname: df.String, Lastname: dl.String}
-		movies = append(movies, m)
-	}
+	
 	json.NewEncoder(w).Encode(movies)
 }
 
-func DeleteMovie(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "Application/json")
-	params := mux.Vars(r)
-	_, err := db.Exec("DELETE FROM movies WHERE id = $1", params["id"])
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	// json.NewEncoder(w).Encode(GetMovies(w, r))
-	GetMovies(w, r)
-}
-
 func GetMovie(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "Application/json")
+	w.Header().Set("Content-Type", "application/json")
 	params := mux.Vars(r)
-	var m Movie
-	var df, dl sql.NullString
-	err := db.QueryRow("SELECT id, isbn, title, director_firstname, director_lastname FROM movies WHERE id = $1", params["id"]).Scan(&m.ID, &m.Isbn, &m.Title, &df, &dl)
-	if err != nil {
-		if err == sql.ErrNoRows {
+	
+	var movie Movie
+	if err := db.First(&movie, params["id"]).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
 			http.Error(w, "Movie not found", http.StatusNotFound)
 			return
 		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	m.Director = &Director{
-		Firstname: df.String,
-		Lastname:  dl.String,
-	}
-	json.NewEncoder(w).Encode(m)
+	
+	json.NewEncoder(w).Encode(movie)
 }
 
 func CreateMovie(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	
 	var movie Movie
 	if err := json.NewDecoder(r.Body).Decode(&movie); err != nil {
 		http.Error(w, "Invalid input: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	
 	if movie.Title == "" || movie.Isbn == "" {
 		http.Error(w, "Title and ISBN are required", http.StatusBadRequest)
 		return
 	}
-	err := db.QueryRow("INSERT INTO movies (isbn, title, director_firstname, director_lastname) VALUES ($1, $2, $3, $4) RETURNING id",
-		movie.Isbn, movie.Title, movie.Director.Firstname, movie.Director.Lastname).Scan(&movie.ID)
-	if err != nil {
+	
+	if err := db.Create(&movie).Error; err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	
 	json.NewEncoder(w).Encode(movie)
 }
 
 func UpdateMovie(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "Application/json")
+	w.Header().Set("Content-Type", "application/json")
 	params := mux.Vars(r)
+	
 	var movie Movie
 	if err := json.NewDecoder(r.Body).Decode(&movie); err != nil {
-		http.Error(w, "Invalid input :" +err.Error(), http.StatusBadRequest)
+		http.Error(w, "Invalid input: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-   if movie.Title == "" || movie.Isbn == "" {
-	http.Error(w, "Title and ISBN are required", http.StatusBadRequest)
-	return
-   }
-
-   _, err := db.Exec("UPDATE movies SET isbn = $1, title = $2, director_firstname = $3, director_lastname = $4 WHERE id = $5",
-	movie.Isbn, movie.Title, movie.Director.Firstname, movie.Director.Lastname, params["id"])
-	if err != nil{
+	
+	if movie.Title == "" || movie.Isbn == "" {
+		http.Error(w, "Title and ISBN are required", http.StatusBadRequest)
+		return
+	}
+	
+	// Check if movie exists
+	var existing Movie
+	if err := db.First(&existing, params["id"]).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			http.Error(w, "Movie not found", http.StatusNotFound)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	movie.ID = params["id"]
+	
+	// Update the movie
+	movie.ID = existing.ID
+	if err := db.Save(&movie).Error; err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	
 	json.NewEncoder(w).Encode(movie)
+}
 
-
+func DeleteMovie(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	params := mux.Vars(r)
+	
+	if err := db.Delete(&Movie{}, params["id"]).Error; err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	
+	GetMovies(w, r)
 }
